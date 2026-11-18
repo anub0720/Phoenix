@@ -25,6 +25,12 @@ phoenix = "phoenix.cli:app"
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+    "integration: tests involving multiple real Phoenix components",
+    "docker: tests requiring Docker Engine",
+]

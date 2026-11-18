@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 import time
 from phoenix.domain.restoration import RestoreResult
-
+import secrets
 
 class DockerRestoreAdapter:
     def __init__(
@@ -22,7 +22,8 @@ class DockerRestoreAdapter:
         self.pids_limit = pids_limit
         self.readiness_timeout = readiness_timeout
         self.restore_timeout = restore_timeout
-
+    def _generate_restore_password(self) -> str:
+        return secrets.token_urlsafe(32)
     def _create_container(
         self,
         backup_path: Path,
@@ -31,12 +32,14 @@ class DockerRestoreAdapter:
         """Create an isolated PostgreSQL container for restoration."""
 
         backup_path = backup_path.resolve()
-
+        restore_password = self._generate_restore_password()
         command = [
             "docker",
             "run",
             "-d",
             "--name", container_name,
+            "--label", "com.phoenix.managed=true",
+            "--label", "com.phoenix.purpose=restore",
             "--network", "none",
             "--read-only",
            "--cap-drop",
@@ -58,7 +61,7 @@ class DockerRestoreAdapter:
                 f"type=bind,source={backup_path},"
                 "target=/backup.dump,readonly"
             ),
-            "-e", "POSTGRES_PASSWORD=phoenix_temporary_password",
+            "-e", f"POSTGRES_PASSWORD={restore_password}",
             self.image,
         ]
 
@@ -159,7 +162,34 @@ class DockerRestoreAdapter:
             )
 
     def _remove_container(self, container_id: str) -> None:
-        """Forcefully remove a temporary restore container."""
+        """Forcefully remove a container only when Phoenix owns it."""
+
+        ownership_result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "com.phoenix.managed" }}|'
+                '{{ index .Config.Labels "com.phoenix.purpose" }}',
+                container_id,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if ownership_result.returncode != 0:
+            raise RuntimeError(
+                "Failed to verify restore container ownership: "
+                f"{ownership_result.stderr.strip()}"
+            )
+
+        if ownership_result.stdout.strip() != "true|restore":
+            raise RuntimeError(
+                f"Refusing to remove container {container_id}: "
+                "it is not a Phoenix restore container."
+            )
 
         result = subprocess.run(
             [
@@ -252,3 +282,43 @@ class DockerRestoreAdapter:
             error_message=error_message,
             retained=retained,
         )
+
+    def list_managed_containers(self) -> list[str]:
+        """List containers explicitly labelled as Phoenix restore containers."""
+
+        result = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-aq",
+                "--filter", "label=com.phoenix.managed=true",
+                "--filter", "label=com.phoenix.purpose=restore",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to list Phoenix containers: {result.stderr.strip()}"
+            )
+
+        return [
+            container_id
+            for container_id in result.stdout.splitlines()
+            if container_id.strip()
+        ]
+
+    def cleanup_managed_containers(self) -> list[str]:
+        """Remove all containers carrying Phoenix restore ownership labels."""
+
+        container_ids = self.list_managed_containers()
+        removed = []
+
+        for container_id in container_ids:
+            self._remove_container(container_id)
+            removed.append(container_id)
+
+        return removed

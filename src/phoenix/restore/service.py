@@ -8,8 +8,12 @@ from phoenix.adapters.docker_restore_adapter import DockerRestoreAdapter
 from phoenix.domain.restoration import RestoreResult
 
 
+class BackupIntegrityError(Exception):
+    """Raised when a backup changes after registration."""
+
+
 class RestoreService:
-    """Coordinates backup integrity verification and restoration."""
+    """Coordinates integrity verification and backup restoration."""
 
     def __init__(
         self,
@@ -24,23 +28,21 @@ class RestoreService:
         display_name: str,
         diagnostic_mode: bool = False,
     ) -> RestoreResult:
-
-        # Step 1: Retrieve the registered backup.
+        # Retrieve the registered artifact.
         artifact = self.backup_service.get_backup(display_name)
 
-        # Step 2: Verify that the backup has not changed.
-        integrity_result = (
-            self.backup_service.verify_backup_integrity(display_name)
+        # Verify the registered SHA-256 baseline.
+        integrity = self.backup_service.verify_backup_integrity(
+            display_name
         )
 
-        # Step 3: Refuse restoration if integrity verification fails.
-        if not integrity_result.verified:
-            raise ValueError(
-                f"Backup integrity verification failed for "
-                f"'{display_name}'. Restoration cancelled."
+        if not integrity.verified:
+            raise BackupIntegrityError(
+                f"Integrity verification failed for '{display_name}'. "
+                "Restoration cancelled."
             )
 
-        # Step 4: Restore using the Docker adapter.
+        # Delegate Docker operations to the adapter.
         return self.restore_adapter.restore(
             backup_path=Path(artifact.local_path),
             backup_name=artifact.display_name,

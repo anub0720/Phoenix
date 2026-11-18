@@ -53,6 +53,14 @@ def test_create_container_returns_container_id(tmp_path, monkeypatch):
     assert "--cpus" in command
     assert "--pids-limit" in command
     assert "--mount" in command
+    assert [
+        command[index:index + 2]
+        for index, value in enumerate(command[:-1])
+        if value == "--label"
+    ] == [
+        ["--label", "com.phoenix.managed=true"],
+        ["--label", "com.phoenix.purpose=restore"],
+    ]
 
 
 def test_create_container_raises_when_docker_fails(
@@ -147,10 +155,12 @@ def test_restore_database_raises_when_pg_restore_fails(
 
 
 def test_remove_container_calls_docker_rm(monkeypatch):
-    captured = {}
+    commands = []
 
     def fake_run(command, **kwargs):
-        captured["command"] = command
+        commands.append(command)
+        if command[1] == "inspect":
+            return completed_process(stdout="true|restore\n")
         return completed_process()
 
     monkeypatch.setattr(
@@ -161,12 +171,38 @@ def test_remove_container_calls_docker_rm(monkeypatch):
     adapter = DockerRestoreAdapter()
     adapter._remove_container("container-123")
 
-    assert captured["command"] == [
-        "docker",
-        "rm",
-        "-f",
-        "container-123",
+    assert commands == [
+        [
+            "docker",
+            "inspect",
+            "--format",
+            '{{ index .Config.Labels "com.phoenix.managed" }}|'
+            '{{ index .Config.Labels "com.phoenix.purpose" }}',
+            "container-123",
+        ],
+        ["docker", "rm", "-f", "container-123"],
     ]
+
+
+def test_remove_container_refuses_unmanaged_container(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return completed_process(stdout="false|restore\n")
+
+    monkeypatch.setattr(
+        "phoenix.adapters.docker_restore_adapter.subprocess.run",
+        fake_run,
+    )
+
+    adapter = DockerRestoreAdapter()
+
+    with pytest.raises(RuntimeError, match="Refusing to remove"):
+        adapter._remove_container("unmanaged-container")
+
+    assert len(commands) == 1
+    assert commands[0][1] == "inspect"
 
 
 def test_successful_restore_removes_container(
@@ -369,3 +405,17 @@ def test_cleanup_failure_is_reported(
     assert result.success is False
     assert result.retained is True
     assert "cleanup failed" in result.error_message.lower()
+def test_restore_password_is_generated():
+    adapter = DockerRestoreAdapter()
+
+    password = adapter._generate_restore_password()
+
+    assert password
+    assert len(password) >= 32
+def test_restore_passwords_are_unique():
+    adapter = DockerRestoreAdapter()
+
+    password_1 = adapter._generate_restore_password()
+    password_2 = adapter._generate_restore_password()
+
+    assert password_1 != password_2

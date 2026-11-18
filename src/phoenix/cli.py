@@ -13,6 +13,11 @@ from phoenix.adapters.sqlite_backup_repository import (
 from phoenix.adapters.postgres.archive_inspector import (
     PostgresArchiveInspector,
 )
+from phoenix.restore.service import (
+    RestoreService,
+    BackupIntegrityError,
+)
+from phoenix.adapters.docker_restore_adapter import DockerRestoreAdapter
 
 app = typer.Typer(
     name="phoenix",
@@ -27,7 +32,13 @@ backup_app = typer.Typer(
 )
 
 app.add_typer(backup_app, name="backup")
+restore_app = typer.Typer(
+    name="restore",
+    help="Manage PostgreSQL restore environments.",
+    no_args_is_help=True,
+)
 
+app.add_typer(restore_app, name="restore")
 
 def get_backup_service() -> BackupService:
     """Create the backup service with its SQLite adapter."""
@@ -37,7 +48,16 @@ def get_backup_service() -> BackupService:
     repository = SQLiteBackupRepository(database_path)
 
     return BackupService(repository)
+def get_restore_service() -> RestoreService:
+    """Create the restore service and its dependencies."""
 
+    backup_service = get_backup_service()
+    restore_adapter = DockerRestoreAdapter()
+
+    return RestoreService(
+        backup_service=backup_service,
+        restore_adapter=restore_adapter,
+    )
 
 @app.command()
 def version():
@@ -209,6 +229,114 @@ def inspect_backup(
         typer.secho(str(error), fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
+
+@backup_app.command("restore")
+def restore_backup(
+    name: str = typer.Argument(
+        ...,
+        help="Registered backup name to restore.",
+    ),
+    diagnostic: bool = typer.Option(
+        False,
+        "--diagnostic",
+        help="Retain the temporary container for investigation.",
+    ),
+):
+    """Restore a registered PostgreSQL backup in an isolated container."""
+
+    service = get_restore_service()
+
+    typer.echo(f"Starting restore for '{name}'...")
+
+    try:
+        result = service.restore_backup(
+            display_name=name,
+            diagnostic_mode=diagnostic,
+        )
+
+    except (LookupError, FileNotFoundError, BackupIntegrityError) as error:
+        typer.secho(
+            f"RESTORE ABORTED: {error}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(f"\nBackup: {result.backup_name}")
+    typer.echo(f"Duration: {result.duration_seconds:.2f} seconds")
+
+    if result.success:
+        typer.secho(
+            "\nRESTORE: SUCCESS",
+            fg=typer.colors.GREEN,
+        )
+    else:
+        typer.secho(
+            "\nRESTORE: FAILED",
+            fg=typer.colors.RED,
+        )
+        if result.error_message:
+            typer.echo(f"Error: {result.error_message}")
+
+    if result.container_id:
+        typer.echo(f"Container ID: {result.container_id}")
+
+    if result.retained:
+        typer.secho(
+            "Container retained for investigation.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.echo("Temporary container cleaned up.")
+
+    if not result.success:
+        raise typer.Exit(code=1)
+
+@restore_app.command("cleanup")
+def cleanup_restore_containers(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt.",
+    ),
+):
+    """Remove containers owned by Phoenix restore operations."""
+
+    adapter = DockerRestoreAdapter()
+
+    try:
+        container_ids = adapter.list_managed_containers()
+
+        if not container_ids:
+            typer.echo("No Phoenix restore containers found.")
+            return
+
+        typer.echo(
+            f"Found {len(container_ids)} Phoenix restore container(s):"
+        )
+
+        for container_id in container_ids:
+            typer.echo(f"  {container_id}")
+
+        if not yes:
+            confirmed = typer.confirm(
+                "Remove these containers?",
+                default=False,
+            )
+            if not confirmed:
+                typer.echo("Cleanup cancelled.")
+                return
+
+        removed = adapter.cleanup_managed_containers()
+
+        typer.secho(
+            f"Removed {len(removed)} container(s).",
+            fg=typer.colors.GREEN,
+        )
+
+    except RuntimeError as error:
+        typer.secho(str(error), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
