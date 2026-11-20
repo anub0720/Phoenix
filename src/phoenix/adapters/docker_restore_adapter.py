@@ -213,6 +213,12 @@ class DockerRestoreAdapter:
             raise RuntimeError(
                 f"Failed to remove restore container: {result.stderr.strip()}"
             )
+    def cleanup_container(self, container_id: str) -> None:
+        """Remove one container after verifying Phoenix ownership."""
+        if not container_id or not container_id.strip():
+            raise ValueError("Container ID cannot be empty.")
+
+        self._remove_container(container_id)
     def restore(
         self,
         backup_path: Path,

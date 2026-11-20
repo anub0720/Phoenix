@@ -18,7 +18,11 @@ from phoenix.restore.service import (
     BackupIntegrityError,
 )
 from phoenix.adapters.docker_restore_adapter import DockerRestoreAdapter
-
+from phoenix.adapters.postgres.validation_adapter import (
+    PostgresValidationAdapter,
+)
+from phoenix.recovery.service import RecoveryService
+from phoenix.domain.validation import ValidationPlan
 app = typer.Typer(
     name="phoenix",
     help="Automated PostgreSQL recovery testing.",
@@ -58,7 +62,26 @@ def get_restore_service() -> RestoreService:
         backup_service=backup_service,
         restore_adapter=restore_adapter,
     )
+def get_recovery_service() -> RecoveryService:
+    """Create the end-to-end recovery service and its dependencies."""
 
+    backup_service = get_backup_service()
+    restore_adapter = DockerRestoreAdapter()
+
+    restore_service = RestoreService(
+        backup_service=backup_service,
+        restore_adapter=restore_adapter,
+    )
+
+    validation_adapter = PostgresValidationAdapter(
+        database_name="phoenix_restore",
+    )
+
+    return RecoveryService(
+        restore_service=restore_service,
+        validation_adapter=validation_adapter,
+        restore_adapter=restore_adapter,
+    )
 @app.command()
 def version():
     """Display Phoenix version."""
@@ -337,7 +360,149 @@ def cleanup_restore_containers(
     except RuntimeError as error:
         typer.secho(str(error), fg=typer.colors.RED)
         raise typer.Exit(code=1)
+@backup_app.command("recover")
+def recover_backup(
+    name: str = typer.Argument(
+        ...,
+        help="Registered backup name to recover and validate.",
+    ),
+    schema: list[str] = typer.Option(
+        None,
+        "--schema",
+        help="Expected schema name. May be specified more than once.",
+    ),
+    table: list[str] = typer.Option(
+        None,
+        "--table",
+        help="Expected table in schema.table format. May be repeated.",
+    ),
+    extension: list[str] = typer.Option(
+        None,
+        "--extension",
+        help="Expected PostgreSQL extension. May be repeated.",
+    ),
+    diagnostic: bool = typer.Option(
+        False,
+        "--diagnostic",
+        help="Retain the restored container for investigation.",
+    ),
+):
+    """Restore a backup and validate the recovered database."""
 
+    tables = []
+
+    try:
+        for value in table or []:
+            schema_name, separator, table_name = value.partition(".")
+
+            if not separator or not schema_name or not table_name:
+                raise ValueError(
+                    f"Invalid table '{value}'. Use schema.table format."
+                )
+
+            tables.append((schema_name, table_name))
+
+        plan = ValidationPlan(
+            database_name="phoenix_restore",
+            schemas=tuple(schema or ()),
+            tables=tuple(tables),
+            extensions=tuple(extension or ()),
+        )
+
+        service = get_recovery_service()
+
+        typer.echo(f"Starting recovery for '{name}'...")
+
+        result = service.recover(
+            backup_name=name,
+            validation_plan=plan,
+            diagnostic_mode=diagnostic,
+        )
+
+    except (LookupError, FileNotFoundError, BackupIntegrityError, ValueError) as error:
+        typer.secho(
+            f"RECOVERY ABORTED: {error}",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo("\nRESTORE")
+
+    if result.restore_success:
+        typer.secho("RESTORE: PASS", fg=typer.colors.GREEN)
+    else:
+        typer.secho("RESTORE: FAIL", fg=typer.colors.RED)
+
+    if result.restore_result.error_message:
+        typer.echo(result.restore_result.error_message)
+
+    typer.echo("\nVALIDATION")
+
+    if result.validation_report is None:
+        typer.secho(
+            "VALIDATION: NOT COMPLETED",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        report = result.validation_report
+
+        for check in report.results:
+            color = (
+                typer.colors.GREEN
+                if check.status.value == "PASS"
+                else typer.colors.RED
+                if check.status.value in ("FAIL", "ERROR")
+                else typer.colors.YELLOW
+            )
+
+            typer.secho(
+                f"{check.status.value}: {check.name}",
+                fg=color,
+            )
+
+            if check.expected is not None:
+                typer.echo(f"  Expected: {check.expected}")
+
+            if check.actual is not None:
+                typer.echo(f"  Actual:   {check.actual}")
+
+            if check.error_message:
+                typer.echo(f"  Error:    {check.error_message}")
+
+        typer.echo(
+            f"\nChecks: {report.total_checks} total | "
+            f"{report.passed} passed | "
+            f"{report.failed} failed | "
+            f"{report.errors} errors | "
+            f"{report.skipped} skipped"
+        )
+
+        typer.echo(
+            f"VALIDATION: {report.overall_status.value}"
+        )
+
+    if result.validation_error:
+        typer.secho(
+            f"Validation error: {result.validation_error}",
+            fg=typer.colors.RED,
+        )
+
+    if result.cleanup_error:
+        typer.secho(
+            f"Cleanup error: {result.cleanup_error}",
+            fg=typer.colors.RED,
+        )
+
+    if result.container_retained:
+        typer.secho(
+            f"Container retained: {result.restore_result.container_id}",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.echo("Temporary container cleaned up.")
+
+    if not result.success:
+        raise typer.Exit(code=1)
 
 if __name__ == "__main__":
     app()
