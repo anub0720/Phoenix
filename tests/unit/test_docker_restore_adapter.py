@@ -91,11 +91,17 @@ def test_wait_for_postgres_retries_until_ready(monkeypatch):
     responses = [
         completed_process(returncode=1),
         completed_process(returncode=0),
+        completed_process(returncode=0),
     ]
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return responses.pop(0)
 
     monkeypatch.setattr(
         "phoenix.adapters.docker_restore_adapter.subprocess.run",
-        lambda *args, **kwargs: responses.pop(0),
+        fake_run,
     )
 
     monkeypatch.setattr(
@@ -106,6 +112,8 @@ def test_wait_for_postgres_retries_until_ready(monkeypatch):
     adapter = DockerRestoreAdapter()
 
     adapter._wait_for_postgres("container-123")
+
+    assert len(commands) == 3
 
 
 def test_restore_database_creates_and_restores_database(

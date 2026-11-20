@@ -50,11 +50,11 @@ def test_complete_recovery_workflow(
         diagnostic_mode=True,
     )
 
-    assert result.success is True
-    assert result.container_id is not None
-    assert result.backup_name == artifact.display_name
-
     try:
+        assert result.success is True
+        assert result.container_id is not None
+        assert result.backup_name == artifact.display_name
+
         # 4. Verify the restored database actually exists.
         import subprocess
 
@@ -82,4 +82,5 @@ def test_complete_recovery_workflow(
         assert query.stdout.strip() == "3"
 
     finally:
-        restore_adapter._remove_container(result.container_id)
+        if result.container_id is not None:
+            restore_adapter._remove_container(result.container_id)

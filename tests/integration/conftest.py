@@ -2,6 +2,7 @@
 """Fixtures for Phoenix integration tests."""
 
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -82,6 +83,8 @@ def postgres_test_dump(tmp_path, require_docker):
                     "exec",
                     container_id,
                     "pg_isready",
+                    "-h",
+                    "127.0.0.1",
                     "-U",
                     "postgres",
                 ],
@@ -94,6 +97,8 @@ def postgres_test_dump(tmp_path, require_docker):
             if result.returncode == 0:
                 ready = True
                 break
+
+            time.sleep(1)
 
         if not ready:
             pytest.fail("Test PostgreSQL did not become ready.")

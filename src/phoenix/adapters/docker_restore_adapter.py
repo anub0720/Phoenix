@@ -85,6 +85,7 @@ class DockerRestoreAdapter:
         """Wait until PostgreSQL accepts connections inside the container."""
 
         deadline = time.monotonic() + self.readiness_timeout
+        ready_once = False
 
         while time.monotonic() < deadline:
             result = subprocess.run(
@@ -103,7 +104,11 @@ class DockerRestoreAdapter:
             )
 
             if result.returncode == 0:
-                return
+                if ready_once:
+                    return
+                ready_once = True
+            else:
+                ready_once = False
 
             time.sleep(1)
 
